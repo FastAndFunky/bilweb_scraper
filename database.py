@@ -1,11 +1,4 @@
-"""
-SQLite database helpers.
-
-Deduplication is handled by the UNIQUE constraint on `unique_key`,
-which is now a composite of  reg.nr | price | seller.
-→ Same car, same price, same seller  → INSERT fails (duplicate) → skip.
-→ Same car, new price or new seller  → INSERT succeeds → new row.
-"""
+"""SQLite database helpers with auto-migration."""
 
 import sqlite3
 import os
@@ -25,6 +18,8 @@ def create_tables():
         CREATE TABLE IF NOT EXISTS listings (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             unique_key          TEXT    UNIQUE NOT NULL,
+            marke               TEXT,
+            modell              TEXT,
             modell_ar           TEXT,
             miltal_km           INTEGER,
             pris_sek            INTEGER,
@@ -35,15 +30,28 @@ def create_tables():
             registreringsnummer TEXT,
             datum_listad        TEXT,
             utrustning          TEXT,
+            battery_kwh         INTEGER,
+            rackvidd_km         INTEGER,
             detail_url          TEXT,
             scraped_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    # Index for fast reg.nr lookups (useful for future queries)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_reg_nr
         ON listings (registreringsnummer);
     """)
+    conn.commit()
+
+    for col, col_type in [
+        ("battery_kwh", "INTEGER"),
+        ("rackvidd_km", "INTEGER"),
+        ("marke",       "TEXT"),
+        ("modell",      "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE listings ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
 
@@ -59,15 +67,9 @@ def listing_exists(unique_key: str) -> bool:
 
 
 def insert_listing(data: dict) -> bool:
-    """
-    Insert a listing.
-    Returns True if inserted, False if an identical
-    (reg.nr + price + seller) row already exists.
-    """
     unique_key = data.get("unique_key", "")
     if not unique_key:
         return False
-
     if listing_exists(unique_key):
         return False
 
@@ -76,17 +78,21 @@ def insert_listing(data: dict) -> bool:
         conn.execute(
             """
             INSERT INTO listings (
-                unique_key, modell_ar, miltal_km, pris_sek, plats,
-                saljare, privat, utrustningspaket, registreringsnummer,
-                datum_listad, utrustning, detail_url
+                unique_key, marke, modell, modell_ar, miltal_km,
+                pris_sek, plats, saljare, privat, utrustningspaket,
+                registreringsnummer, datum_listad, utrustning,
+                battery_kwh, rackvidd_km, detail_url
             ) VALUES (
-                :unique_key, :modell_ar, :miltal_km, :pris_sek, :plats,
-                :saljare, :privat, :utrustningspaket, :registreringsnummer,
-                :datum_listad, :utrustning, :detail_url
+                :unique_key, :marke, :modell, :modell_ar, :miltal_km,
+                :pris_sek, :plats, :saljare, :privat, :utrustningspaket,
+                :registreringsnummer, :datum_listad, :utrustning,
+                :battery_kwh, :rackvidd_km, :detail_url
             )
             """,
             {
                 "unique_key":          unique_key,
+                "marke":               data.get("marke", ""),
+                "modell":              data.get("modell", ""),
                 "modell_ar":           data.get("modell_ar", ""),
                 "miltal_km":           data.get("miltal_km"),
                 "pris_sek":            data.get("pris_sek"),
@@ -97,13 +103,14 @@ def insert_listing(data: dict) -> bool:
                 "registreringsnummer": data.get("registreringsnummer", ""),
                 "datum_listad":        data.get("datum_listad", ""),
                 "utrustning":          data.get("utrustning", ""),
+                "battery_kwh":         data.get("battery_kwh"),
+                "rackvidd_km":         data.get("rackvidd_km"),
                 "detail_url":          data.get("detail_url", ""),
             },
         )
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        # Race condition guard — another process inserted the same key
         return False
     finally:
         conn.close()
@@ -116,7 +123,8 @@ def export_csv():
     conn = get_connection()
     df = pd.read_sql_query(
         """
-        SELECT registreringsnummer, modell_ar, miltal_km, pris_sek,
+        SELECT marke, modell, registreringsnummer, modell_ar,
+               miltal_km, pris_sek, battery_kwh, rackvidd_km,
                plats, saljare, privat, utrustningspaket,
                datum_listad, utrustning, detail_url, scraped_at
         FROM listings
