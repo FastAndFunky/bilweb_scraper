@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+lxml
+schedule
+pandas
+sqlite3-api
