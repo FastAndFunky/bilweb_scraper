@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 """
-Main scraper — paginate search results, visit each detail page,
-merge data, and store.
-
-Deduplication logic:
-  unique_key = "{reg.nr}|{price}|{seller}"
-  → same car, same price, same seller  = SKIP
-  → same car, new price or new seller  = INSERT (new row)
-  → new car                            = INSERT (new row)
+Multi-model EV scraper for bilweb.se.
+Dedup: unique_key = "{reg.nr}|{price}|{seller}"
 """
 
 import time
 import logging
 import requests
 
-from config import SEARCH_URL, HEADERS, REQUEST_DELAY
+from config import SEARCH_QUERIES, MIN_PRICE, MAX_PRICE, HEADERS, REQUEST_DELAY
 from database import create_tables, insert_listing, export_csv
 from parser import parse_search_page, parse_detail_page, has_next_page
 
@@ -34,95 +28,134 @@ def fetch(url: str) -> str:
 
 
 def build_unique_key(data: dict) -> str:
-    """
-    Composite key so that a listing is only re-inserted when
-    the price or seller actually changes.
-
-    Format:  "AAB52J|254900|Hedin Automotive KIA Tagene"
-    Fallback (no reg.nr):  "460908|254900|Hedin Automotive KIA Tagene"
-    """
     reg    = data.get("registreringsnummer", "").strip()
     price  = data.get("pris_sek", "")
     seller = data.get("saljare", "").strip()
-
     identifier = reg if reg else data.get("_vehicle_id", data.get("detail_url", ""))
     return f"{identifier}|{price}|{seller}"
+
+
+def passes_filters(data: dict, filters: dict) -> bool:
+    if "battery_kwh_min" in filters or "battery_kwh_max" in filters:
+        kwh = data.get("battery_kwh")
+        if kwh is None:
+            return False
+        lo = filters.get("battery_kwh_min", 0)
+        hi = filters.get("battery_kwh_max", 9999)
+        if not (lo <= kwh <= hi):
+            return False
+
+    price = data.get("pris_sek")
+    if price is not None:
+        if price < MIN_PRICE or price > MAX_PRICE:
+            return False
+
+    return True
 
 
 def run_scraper():
     create_tables()
 
-    page = 1
-    new_count = 0
-    skip_count = 0
+    log.info(f"Price range: {MIN_PRICE:,} – {MAX_PRICE:,} kr")
+    log.info(f"Tracking {len(SEARCH_QUERIES)} queries")
 
-    while True:
-        url = SEARCH_URL.format(page=page)
-        log.info(f"--- Search page {page} ---")
+    total_new = 0
+    total_skip = 0
+    total_filtered = 0
 
-        try:
-            html = fetch(url)
-        except requests.HTTPError as exc:
-            log.error(f"Search page {exc.response.status_code}. Stopping.")
-            break
+    for query in SEARCH_QUERIES:
+        q_name   = query["name"]
+        q_url    = query["url"]
+        q_filt   = query.get("filters", {})
+        q_marke  = query.get("make", "")
+        q_modell = query.get("model", "")
 
-        stubs = parse_search_page(html)
-        if not stubs:
-            log.info("No listings on this page. Done paginating.")
-            break
+        log.info(f"\n{'='*60}")
+        log.info(f"  QUERY: {q_name}")
+        log.info(f"{'='*60}")
 
-        for stub in stubs:
-            detail_url = stub.get("detail_url", "")
-            if not detail_url:
-                continue
+        page = 1
+        while True:
+            url = q_url.format(page=page)
+            log.info(f"--- {q_name} — page {page} ---")
 
-            # Keep the raw vehicle-id for the fallback key
-            stub["_vehicle_id"] = stub.get("unique_key", "")
-
-            # ── Fetch detail page for reg.nr + utrustning ──
             try:
-                detail_html = fetch(detail_url)
-                detail_data = parse_detail_page(detail_html, detail_url)
-            except Exception as exc:
-                log.warning(f"Detail page failed ({detail_url}): {exc}")
-                detail_data = {
-                    "registreringsnummer": "",
-                    "utrustning": "",
-                }
+                html = fetch(url)
+            except requests.HTTPError as exc:
+                log.error(f"HTTP {exc.response.status_code}. Stopping.")
+                break
 
-            # ── Merge: search-card data  +  detail-page data ──
-            listing = stub.copy()
-            listing.update(detail_data)
+            stubs = parse_search_page(html)
+            if not stubs:
+                log.info("No listings on this page.")
+                break
 
-            # ── Build composite unique_key ──
-            listing["unique_key"] = build_unique_key(listing)
+            for stub in stubs:
+                detail_url = stub.get("detail_url", "")
+                if not detail_url:
+                    continue
 
-            # ── Insert (DB UNIQUE constraint handles dedup) ──
-            inserted = insert_listing(listing)
-            if inserted:
-                new_count += 1
-                reg = listing.get("registreringsnummer", "???")
-                log.info(
-                    f"  ✅  NEW  {reg:<8s}  "
-                    f"{listing.get('modell_ar', '?')}  "
-                    f"{listing.get('pris_sek', '?')} SEK  "
-                    f"{listing.get('saljare', '?'):<30s}  "
-                    f"[{listing.get('utrustningspaket', '?')}]"
-                )
-            else:
-                skip_count += 1
-                log.debug(
-                    f"  ⏭️  SKIP (same price & seller)  "
-                    f"{listing.get('registreringsnummer', '?')}  "
-                    f"{listing.get('pris_sek', '?')} SEK"
-                )
+                stub["_vehicle_id"] = stub.get("unique_key", "")
 
-        if not has_next_page(html):
-            log.info("No next-page link. Done.")
-            break
-        page += 1
+                try:
+                    detail_html = fetch(detail_url)
+                    detail_data = parse_detail_page(detail_html, detail_url)
+                except Exception as exc:
+                    log.warning(f"Detail failed ({detail_url}): {exc}")
+                    detail_data = {
+                        "marke": "", "modell": "",
+                        "registreringsnummer": "", "utrustning": "",
+                        "battery_kwh": None, "rackvidd_km": None,
+                    }
 
-    log.info(f"=== Scrape complete: {new_count} new, {skip_count} skipped ===")
+                # ── Merge ──
+                listing = stub.copy()
+                detail_rv = detail_data.pop("rackvidd_km", None)
+                listing.update(detail_data)
+                if detail_rv is not None:
+                    listing["rackvidd_km"] = detail_rv
+
+                # ── Fallback: config values if <h1> didn't yield anything ──
+                if not listing.get("marke"):
+                    listing["marke"] = q_marke
+                if not listing.get("modell"):
+                    listing["modell"] = q_modell
+
+                # ── Filters ──
+                if not passes_filters(listing, q_filt):
+                    total_filtered += 1
+                    continue
+
+                # ── Dedup ──
+                listing["unique_key"] = build_unique_key(listing)
+
+                # ── Insert ──
+                inserted = insert_listing(listing)
+                if inserted:
+                    total_new += 1
+                    log.info(
+                        f"  ✅  NEW  "
+                        f"{listing.get('registreringsnummer', '???'):<8s}  "
+                        f"{listing.get('marke', '?')} "
+                        f"{listing.get('modell', '?')} "
+                        f"{listing.get('modell_ar', '?')}  "
+                        f"{listing.get('pris_sek', '?'):>7,} kr  "
+                        f"{listing.get('battery_kwh', '?')} kWh  "
+                        f"{listing.get('rackvidd_km', '?')} km"
+                    )
+                else:
+                    total_skip += 1
+
+            if not has_next_page(html):
+                break
+            page += 1
+
+    log.info(
+        f"\n{'='*60}\n"
+        f"  DONE  ✅ {total_new} new  ⏭️ {total_skip} skipped  "
+        f"🚫 {total_filtered} filtered\n"
+        f"{'='*60}"
+    )
     export_csv()
 
 
