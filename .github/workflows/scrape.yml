@@ -1,4 +1,4 @@
-name: Bilweb Kia e-Niro Scraper
+name: Bilweb cars Scraper
 
 on:
   schedule:
