@@ -1,20 +1,40 @@
-"""Configuration for the Kia e-Niro scraper."""
+"""
+Configuration for the bilweb.se EV scraper.
+═══════════════════════════════════════════════════════════════
+  ✏️  EASY SETTINGS — edit ONLY this section
+═══════════════════════════════════════════════════════════════
+"""
+
+MIN_PRICE = 15_000
+MAX_PRICE = 260_000
+
+CARS = [
+    {
+        "make": "Kia",
+        "model": "e-Niro",
+        "year_from": 2019,
+        "year_to": 2021,
+    },
+    {
+        "make": "Hyundai",
+        "model": "Kona",
+        "battery_kwh_min": 60,
+        "battery_kwh_max": 68,
+    },
+    {
+        "make": "Volkswagen",
+        "model": "ID.3",
+    },
+]
+
+"""
+═══════════════════════════════════════════════════════════════
+  ⚙️  ADVANCED SETTINGS
+═══════════════════════════════════════════════════════════════
+"""
 
 BASE_URL = "https://bilweb.se"
-
-# ← Verify this URL in your browser.  Bilweb may use a different query-string
-#   format (e.g. /sok/kia/e-niro?yearFrom=2019&yearTo=2021&page={page}).
-#   Open the search in your browser, copy the URL, and paste it here.
-SEARCH_URL = (
-    "https://bilweb.se/sok?"
-    "make=Kia"
-    "&model=e-Niro"
-    "&yearFrom=2019"
-    "&yearTo=2021"
-    "&page={page}"
-)
-
-REQUEST_DELAY = 2          # seconds between requests
+REQUEST_DELAY = 2
 DB_PATH       = "data/listings.db"
 CSV_PATH      = "data/listings.csv"
 
@@ -28,4 +48,46 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-SCRAPE_TIME = "07:00"
+
+def _build_search_queries() -> list[dict]:
+    queries = []
+    for car in CARS:
+        make  = car["make"]
+        model = car["model"]
+        params = [
+            f"make={make}",
+            f"model={model}",
+            f"priceFrom={MIN_PRICE}",
+            f"priceTo={MAX_PRICE}",
+        ]
+        if "year_from" in car:
+            params.append(f"yearFrom={car['year_from']}")
+        if "year_to" in car:
+            params.append(f"yearTo={car['year_to']}")
+        params.append("page={page}")
+
+        url = f"{BASE_URL}/sok?{'&'.join(params)}"
+
+        filters = {}
+        if "battery_kwh_min" in car:
+            filters["battery_kwh_min"] = car["battery_kwh_min"]
+        if "battery_kwh_max" in car:
+            filters["battery_kwh_max"] = car["battery_kwh_max"]
+
+        label = f"{make} {model}"
+        if "year_from" in car:
+            label += f" {car['year_from']}-{car.get('year_to', 'now')}"
+        if "battery_kwh_min" in car:
+            label += f" {car['battery_kwh_min']}-{car['battery_kwh_max']}kWh"
+
+        queries.append({
+            "name":    label,
+            "url":     url,
+            "filters": filters,
+            "make":    make,
+            "model":   model,
+        })
+    return queries
+
+
+SEARCH_QUERIES = _build_search_queries()
