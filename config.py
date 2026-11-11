@@ -5,9 +5,15 @@ Configuration for the bilweb.se EV scraper.
 ═══════════════════════════════════════════════════════════════
 """
 
+# ── Price limits (ALL cars) ──
 MIN_PRICE = 15_000
 MAX_PRICE = 260_000
 
+# ── Year limits (default for ALL cars, override per car below) ──
+DEFAULT_YEAR_FROM = 2019
+DEFAULT_YEAR_TO   = 2025
+
+# ── Cars to track ──
 CARS = [
     {
         "make": "Kia",
@@ -29,7 +35,7 @@ CARS = [
 
 """
 ═══════════════════════════════════════════════════════════════
-  ⚙️  ADVANCED SETTINGS
+  ⚙️  ADVANCED — do not edit unless you know what you're doing
 ═══════════════════════════════════════════════════════════════
 """
 
@@ -54,18 +60,18 @@ def _build_search_queries() -> list[dict]:
     for car in CARS:
         make  = car["make"]
         model = car["model"]
+        yf    = car.get("year_from", DEFAULT_YEAR_FROM)
+        yt    = car.get("year_to",   DEFAULT_YEAR_TO)
+
         params = [
             f"make={make}",
             f"model={model}",
+            f"yearFrom={yf}",
+            f"yearTo={yt}",
             f"priceFrom={MIN_PRICE}",
             f"priceTo={MAX_PRICE}",
+            "page={page}",
         ]
-        if "year_from" in car:
-            params.append(f"yearFrom={car['year_from']}")
-        if "year_to" in car:
-            params.append(f"yearTo={car['year_to']}")
-        params.append("page={page}")
-
         url = f"{BASE_URL}/sok?{'&'.join(params)}"
 
         filters = {}
@@ -74,9 +80,7 @@ def _build_search_queries() -> list[dict]:
         if "battery_kwh_max" in car:
             filters["battery_kwh_max"] = car["battery_kwh_max"]
 
-        label = f"{make} {model}"
-        if "year_from" in car:
-            label += f" {car['year_from']}-{car.get('year_to', 'now')}"
+        label = f"{make} {model} {yf}-{yt}"
         if "battery_kwh_min" in car:
             label += f" {car['battery_kwh_min']}-{car['battery_kwh_max']}kWh"
 
