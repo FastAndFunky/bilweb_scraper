@@ -1,7 +1,7 @@
 """
 Parsing logic for bilweb.se
 Search cards : #vehicle-grid > div[data-vehicle-id]
-Detail page  : <h1> + spec grid + equipment panel
+Detail page  : spec grid + full-text regex fallbacks
 """
 
 import re
@@ -124,8 +124,6 @@ def parse_search_page(html: str) -> list[dict]:
 
         listings.append({
             "unique_key":          vehicle_id,
-            "marke":               "",       # ← detail page
-            "modell":              "",       # ← detail page
             "modell_ar":           modell_ar,
             "miltal_km":           _mil_to_km(miltal_raw),
             "pris_sek":            pris_sek,
@@ -133,10 +131,10 @@ def parse_search_page(html: str) -> list[dict]:
             "saljare":             saljare,
             "privat":              privat,
             "utrustningspaket":    utrustningspaket,
-            "registreringsnummer": "",       # ← detail page
+            "registreringsnummer": "",
             "datum_listad":        datum_listad,
-            "utrustning":          "",       # ← detail page
-            "battery_kwh":         None,     # ← detail page
+            "utrustning":          "",
+            "battery_kwh":         None,
             "rackvidd_km":         _parse_int(rackvidd_raw),
             "detail_url":          href,
         })
@@ -183,22 +181,6 @@ def parse_detail_page(html: str, detail_url: str) -> dict:
     full_text = soup.get_text(" ", strip=True)
     spec_grid = soup.select_one("div.grid.grid-cols-2")
 
-    # ── 0. Märke & Modell from <h1> ──
-    #    <h1 class="text-2xl sm:text-3xl font-bold text-gray-900">
-    #        Kia e-Niro ADVANCE *
-    #    </h1>
-    marke = ""
-    modell = ""
-    h1 = soup.select_one("h1.text-2xl")
-    if not h1:
-        h1 = soup.select_one("h1")
-    if h1:
-        words = h1.get_text(strip=True).split()
-        if len(words) >= 1:
-            marke = words[0]
-        if len(words) >= 2:
-            modell = words[1]
-
     # ── 1. Registreringsnummer ──
     reg_nr = ""
     if spec_grid:
@@ -208,18 +190,24 @@ def parse_detail_page(html: str, detail_url: str) -> dict:
         if m:
             reg_nr = m.group(1)
 
-    # ── 2. Räckvidd ──
+    # ── 2. Räckvidd (km) ──
     rackvidd_km = None
     if spec_grid:
         rv_raw = _spec_value(spec_grid, "Räckvidd")
         if rv_raw:
             rackvidd_km = _parse_int(rv_raw)
     if rackvidd_km is None:
-        m = re.search(r"(\d{2,4})\s*km\s*räckvidd", full_text, re.IGNORECASE)
-        if m:
-            rackvidd_km = int(m.group(1))
+        for pattern in [
+            r"(\d{2,4})\s*km\s*räckvidd",
+            r"räckvidd[:\s]+(\d{2,4})\s*km",
+            r"(\d{2,4})\s*km\s*\(WLTP\)",
+        ]:
+            m = re.search(pattern, full_text, re.IGNORECASE)
+            if m:
+                rackvidd_km = int(m.group(1))
+                break
 
-    # ── 3. Battery ──
+    # ── 3. Battery (kWh) ──
     battery_kwh = None
     if spec_grid:
         for label in ["Batterikapacitet", "Batteri", "Battery"]:
@@ -228,9 +216,19 @@ def parse_detail_page(html: str, detail_url: str) -> dict:
                 battery_kwh = _parse_int(bat_raw)
                 break
     if battery_kwh is None:
-        m = re.search(r"(\d{2,3})\s*kWh", full_text, re.IGNORECASE)
+        m = re.search(r"(\d{2,3})\s*kW\s*h", full_text, re.IGNORECASE)
         if m:
             battery_kwh = int(m.group(1))
+    if battery_kwh is None:
+        m = re.search(r"(\d{2,3})\s*kwh", detail_url, re.IGNORECASE)
+        if m:
+            battery_kwh = int(m.group(1))
+    if battery_kwh is None:
+        title_tag = soup.find("title")
+        if title_tag:
+            m = re.search(r"(\d{2,3})\s*kW\s*h", title_tag.get_text(), re.IGNORECASE)
+            if m:
+                battery_kwh = int(m.group(1))
 
     # ── 4. Utrustning ──
     utrustning_items: list[str] = []
@@ -247,8 +245,6 @@ def parse_detail_page(html: str, detail_url: str) -> dict:
     utrustning = ", ".join(utrustning_items)
 
     return {
-        "marke":               marke,
-        "modell":              modell,
         "registreringsnummer": reg_nr,
         "utrustning":          utrustning,
         "battery_kwh":         battery_kwh,
