@@ -5,7 +5,7 @@ on:
     # 04:05 UTC = 05:05 CET (winter).
     # During Swedish summer (CEST, UTC+2) this fires at 06:05 local.
     # Change to "5 3 * * *" if you want 05:05 CEST in summer instead.
-    - cron: "5 4 * * *"
+    - cron: "18 10 * * *"
   push:
     branches: [ "main" ]
   pull_request:
